@@ -1,59 +1,86 @@
 # PowerShell Blue Team Cybersecurity Cheat Sheet
 
+**Author:** Kushal Arora  
+**Last-updated:** 2025-08-19
+
+## TLDR - Run these first on a suspected host
+
+| Command | Description |
+|---------|-------------|
+| `Get-Process \| Sort-Object CPU -Descending \| Select-Object -First 10` | Top CPU consuming processes |
+| `Get-CimInstance Win32_Process \| Where-Object {$_.CommandLine -like "*powershell*" -and $_.CommandLine -like "*-enc*"}` | Encoded PowerShell commands |
+| `Get-NetTCPConnection -State Established \| Select-Object LocalPort, RemoteAddress, RemotePort, @{Name="Process";Expression={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName}}` | Active network connections |
+| `Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PowerShell/Operational'; ID=4104} -MaxEvents 50` | Recent PowerShell script blocks |
+| `Get-ChildItem -Path C:\Users\*\AppData\Roaming -Include *.exe -Recurse -ErrorAction SilentlyContinue \| Where-Object {$_.CreationTime -gt (Get-Date).AddHours(-24)}` | New executables in user profiles |
+| `Get-CimInstance Win32_Process \| Where-Object {$_.ExecutablePath -like "*\temp\*" -or $_.ExecutablePath -like "*\tmp\*"}` | Processes from temp directories |
+| `Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4625} -MaxEvents 20` | Recent failed logins |
+| `Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue` | Local administrators |
+| `Get-ScheduledTask \| Where-Object {$_.State -eq "Running" -and $_.TaskPath -notlike "\Microsoft\*"}` | Non-Microsoft running tasks |
+| `Get-CimInstance Win32_StartupCommand` | Startup programs |
+
 ## Table of Contents
 - [PowerShell Basics](#powershell-basics)
-- [Security & Execution Policy](#security--execution-policy)
 - [System Information Gathering](#system-information-gathering)
-- [Process & Service Analysis](#process--service-analysis)
+- [Process and Service Analysis](#process-and-service-analysis)
 - [Network Analysis](#network-analysis)
-- [File System & Registry Analysis](#file-system--registry-analysis)
+- [File System and Registry Analysis](#file-system-and-registry-analysis)
 - [Event Log Analysis](#event-log-analysis)
-- [User & Account Analysis](#user--account-analysis)
+- [User and Account Analysis](#user-and-account-analysis)
 - [Threat Hunting](#threat-hunting)
-- [Incident Response](#incident-response)
-- [Forensics & Evidence Collection](#forensics--evidence-collection)
-- [Security Monitoring](#security-monitoring)
-- [Malware Analysis](#malware-analysis)
-- [Active Directory Security](#active-directory-security)
+- [Detection Recipes](#detection-recipes)
+- [Incident Response Checklist](#incident-response-checklist)
+- [Forensics and Evidence Collection](#forensics-and-evidence-collection)
+- [ANALYSIS ONLY Commands](#analysis-only-commands)
+- [Sysmon and EDR Primer](#sysmon-and-edr-primer)
 - [PowerShell Security Features](#powershell-security-features)
-
----
 
 ## PowerShell Basics
 
 ### Core Commands
 ```powershell
 # Get help for any command
-Get-Help <CommandName>
-Get-Help <CommandName> -Examples
-Get-Help <CommandName> -Full
+Get-Help Get-Process
+Get-Help Get-Process -Examples
+Get-Help Get-Process -Full
 
-# List all available commands
+# List available commands
 Get-Command
 Get-Command *network*
 
 # Get object properties and methods
-Get-Member
-<object> | Get-Member
+Get-Process | Get-Member
+Get-Service | Get-Member
 
 # Format output
-Format-Table, Format-List, Format-Wide
-Out-GridView
+Get-Process | Format-Table
+Get-Process | Format-List
+Get-Process | Out-GridView
+
+# Session transcripts for logging
+Start-Transcript -Path "C:\IR\powershell-session_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+# Your analysis commands here
+Stop-Transcript
+
+# Central transcript logging
+Start-Transcript -Path "\\server\logs\powershell-$env:COMPUTERNAME_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
 ```
 
-### Pipeline & Objects
+### Pipeline and Objects
 ```powershell
 # Pipeline basics
 Get-Process | Where-Object {$_.CPU -gt 100}
 Get-Service | Select-Object Name, Status, StartType
 
 # Filtering and sorting
-Where-Object {condition}
+Where-Object {$_.Property -eq "value"}
 Sort-Object Property
 Select-Object Property1, Property2
+
+# Convert to JSON for API ingestion
+Get-Process | Select-Object ProcessName, Id, CPU | ConvertTo-Json
 ```
 
-### Variables & Data Types
+### Variables and Special Objects
 ```powershell
 # Variables
 $variable = "value"
@@ -67,656 +94,625 @@ $error # Last error
 $PSVersionTable # PowerShell version info
 ```
 
----
-
-## Security & Execution Policy
-
-### Execution Policy Management
-```powershell
-# Check current execution policy
-Get-ExecutionPolicy
-Get-ExecutionPolicy -List
-
-# Set execution policy
-Set-ExecutionPolicy RemoteSigned
-Set-ExecutionPolicy Bypass -Scope Process
-
-# Run script bypassing execution policy
-powershell -ExecutionPolicy Bypass -File script.ps1
-```
-
-### PowerShell Security Features
-```powershell
-# Check PowerShell version (v5+ has better security)
-$PSVersionTable.PSVersion
-
-# Enable script block logging (Windows Event Log)
-Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" -Name "EnableScriptBlockLogging" -Value 1
-
-# Enable module logging
-Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging" -Name "EnableModuleLogging" -Value 1
-```
-
----
-
 ## System Information Gathering
 
-### Basic System Information
 ```powershell
-# Computer information
+# Computer information (modern approach)
 Get-ComputerInfo
-Get-WmiObject -Class Win32_ComputerSystem
-systeminfo
-
-# Operating system details
-Get-WmiObject -Class Win32_OperatingSystem
+Get-CimInstance -ClassName Win32_ComputerSystem
 Get-CimInstance -ClassName Win32_OperatingSystem
 
 # Hardware information
-Get-WmiObject -Class Win32_Processor
-Get-WmiObject -Class Win32_PhysicalMemory
-Get-WmiObject -Class Win32_LogicalDisk
+Get-CimInstance -ClassName Win32_Processor
+Get-CimInstance -ClassName Win32_PhysicalMemory
+Get-CimInstance -ClassName Win32_LogicalDisk
 
-# Installed software
-Get-WmiObject -Class Win32_Product
-Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*
-```
+# Installed software (safer approach)
+Get-CimInstance -ClassName Win32_Product -ErrorAction SilentlyContinue
+Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* -ErrorAction SilentlyContinue
 
-### Environment & Configuration
-```powershell
 # Environment variables
 Get-ChildItem Env:
 $env:PATH
 $env:COMPUTERNAME
 
 # System configuration
-Get-HotFix # Installed updates
-Get-WindowsFeature # Windows features
-Get-WindowsOptionalFeature -Online
+Get-HotFix | Sort-Object InstalledOn -Descending
+Get-WindowsFeature -ErrorAction SilentlyContinue
+Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue
 ```
 
----
+## Process and Service Analysis
 
-## Process & Service Analysis
-
-### Process Analysis
 ```powershell
-# List all processes
-Get-Process
-Get-WmiObject -Class Win32_Process
+# List all processes with safe error handling
+Get-Process -ErrorAction SilentlyContinue
+Get-CimInstance -ClassName Win32_Process
 
 # Detailed process information
-Get-Process | Select-Object ProcessName, Id, CPU, WorkingSet, StartTime
-Get-WmiObject -Class Win32_Process | Select-Object Name, ProcessId, CommandLine, CreationDate
+Get-Process | Where-Object {$_.Path} | Select-Object ProcessName, Id, CPU, WorkingSet, StartTime, Path
+Get-CimInstance -ClassName Win32_Process | Select-Object Name, ProcessId, CommandLine, CreationDate, ExecutablePath
 
 # Process with network connections
-Get-NetTCPConnection | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, @{Name="Process";Expression={(Get-Process -Id $_.OwningProcess).ProcessName}}
+Get-NetTCPConnection | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, @{Name="Process";Expression={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName}}
 
 # Suspicious process indicators
-Get-Process | Where-Object {$_.ProcessName -notmatch "^[a-zA-Z0-9\-_\.]+$"}
-Get-WmiObject Win32_Process | Where-Object {$_.CommandLine -like "*powershell*" -and $_.CommandLine -like "*-encoded*"}
-```
+Get-Process | Where-Object {$_.ProcessName -notmatch "^[a-zA-Z0-9._-]+$"}
+Get-CimInstance Win32_Process | Where-Object {$_.CommandLine -like "*powershell*" -and $_.CommandLine -like "*-encoded*"}
 
-### Service Analysis
-```powershell
-# List all services
+# Service analysis
 Get-Service
-Get-WmiObject -Class Win32_Service
+Get-CimInstance -ClassName Win32_Service
 
-# Service details
+# Service details with safe error handling
 Get-Service | Select-Object Name, Status, StartType, ServiceType
-Get-WmiObject -Class Win32_Service | Select-Object Name, State, StartMode, PathName, StartName
+Get-CimInstance -ClassName Win32_Service | Select-Object Name, State, StartMode, PathName, StartName
 
 # Suspicious services
-Get-WmiObject Win32_Service | Where-Object {$_.PathName -notlike "C:\Windows\*" -and $_.State -eq "Running"}
-```
+Get-CimInstance Win32_Service | Where-Object {$_.PathName -notlike "C:\Windows\*" -and $_.State -eq "Running"}
 
-### Startup Programs
-```powershell
 # Startup programs
-Get-WmiObject Win32_StartupCommand
-Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
-Get-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+Get-CimInstance Win32_StartupCommand
+Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -ErrorAction SilentlyContinue
+Get-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -ErrorAction SilentlyContinue
 ```
-
----
 
 ## Network Analysis
 
-### Network Configuration
 ```powershell
 # Network adapters
 Get-NetAdapter
-Get-WmiObject -Class Win32_NetworkAdapterConfiguration
+Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration
 
 # IP configuration
 Get-NetIPAddress
 Get-NetIPConfiguration
-ipconfig /all
-```
+Get-NetRoute
 
-### Network Connections
-```powershell
 # Active connections
 Get-NetTCPConnection
 Get-NetUDPEndpoint
-netstat -an
 
 # Connections with process information
-Get-NetTCPConnection | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, @{Name="Process";Expression={(Get-Process -Id $_.OwningProcess).ProcessName}}
+Get-NetTCPConnection | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, @{Name="Process";Expression={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName}}
 
 # Listening ports
 Get-NetTCPConnection -State Listen
 Get-NetUDPEndpoint | Where-Object {$_.LocalAddress -eq "0.0.0.0"}
-```
 
-### DNS & Network Security
-```powershell
-# DNS cache
+# DNS and network security
 Get-DnsClientCache
-ipconfig /displaydns
-
-# ARP table
 Get-NetNeighbor
-arp -a
-
-# Routing table
-Get-NetRoute
-route print
-
-# Firewall rules
-Get-NetFirewallRule
 Get-NetFirewallRule -Enabled True
+
+# Export network data
+Get-NetTCPConnection | Export-Csv "network-connections_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv" -NoTypeInformation
 ```
 
----
+## File System and Registry Analysis
 
-## File System & Registry Analysis
-
-### File System Analysis
 ```powershell
-# File searches
-Get-ChildItem -Path C:\ -Recurse -Include *.exe
-Get-ChildItem -Path C:\ -Recurse | Where-Object {$_.LastWriteTime -gt (Get-Date).AddDays(-7)}
+# File searches with error handling
+Get-ChildItem -Path C:\ -Recurse -Include *.exe -ErrorAction SilentlyContinue
+Get-ChildItem -Path C:\ -Recurse -ErrorAction SilentlyContinue | Where-Object {$_.LastWriteTime -gt (Get-Date).AddDays(-7)}
 
 # File hashes
 Get-FileHash -Path "C:\file.exe" -Algorithm SHA256
-Get-ChildItem *.exe | Get-FileHash
+Get-ChildItem *.exe -ErrorAction SilentlyContinue | Get-FileHash
 
 # Hidden files and alternate data streams
-Get-ChildItem -Force -Hidden
-Get-Item -Path "file.txt" -Stream *
-```
+Get-ChildItem -Force -Hidden -ErrorAction SilentlyContinue
+Get-Item -Path "file.txt" -Stream * -ErrorAction SilentlyContinue
 
-### Registry Analysis
-```powershell
-# Registry key enumeration
-Get-ChildItem -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run
-Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+# Registry analysis
+Get-ChildItem -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run -ErrorAction SilentlyContinue
+Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -ErrorAction SilentlyContinue
 
 # Registry monitoring locations
-Get-ItemProperty -Path "HKLM:\SOFTWARE\Classes\exefile\shell\open\command"
-Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services"
+Get-ItemProperty -Path "HKLM:\SOFTWARE\Classes\exefile\shell\open\command" -ErrorAction SilentlyContinue
+Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services" -ErrorAction SilentlyContinue
 
-# Registry searches
-Get-ChildItem -Path HKLM:\ -Recurse | Where-Object {$_.Name -like "*malware*"}
+# File integrity
+Get-CimInstance -ClassName Win32_SystemDriver | Where-Object {$_.State -eq "Running"}
 ```
-
-### File Integrity
-```powershell
-# System file checker
-sfc /scannow
-
-# Windows file integrity
-Get-WmiObject -Class Win32_SystemDriver | Where-Object {$_.State -eq "Running"}
-```
-
----
 
 ## Event Log Analysis
 
-### Event Log Basics
 ```powershell
 # List available logs
-Get-EventLog -List
-Get-WinEvent -ListLog *
+Get-WinEvent -ListLog * -ErrorAction SilentlyContinue
 
-# Read event logs
-Get-EventLog -LogName System -Newest 100
-Get-EventLog -LogName Security -Newest 50
-Get-WinEvent -LogName "Microsoft-Windows-PowerShell/Operational"
-```
+# Modern event log reading with time filtering
+$StartTime = (Get-Date).AddDays(-1)
+Get-WinEvent -FilterHashtable @{LogName='Security'; StartTime=$StartTime} -MaxEvents 100 -ErrorAction SilentlyContinue
 
-### Security Event Analysis
-```powershell
-# Logon events
-Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4624} | Select-Object TimeCreated, Id, LevelDisplayName, Message
+# Security event analysis
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4624} -MaxEvents 50 | Select-Object TimeCreated, Id, LevelDisplayName, Message
 
 # Failed logons
-Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4625}
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4625} -MaxEvents 50
 
 # Account lockouts
-Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4740}
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4740} -MaxEvents 50
 
 # Process creation events
-Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4688}
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4688} -MaxEvents 100
 
 # PowerShell execution events
-Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PowerShell/Operational'; ID=4104}
-```
-
-### Event Log Filtering
-```powershell
-# Time-based filtering
-$StartTime = (Get-Date).AddDays(-1)
-Get-WinEvent -FilterHashtable @{LogName='Security'; StartTime=$StartTime}
+Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PowerShell/Operational'; ID=4104} -MaxEvents 100
 
 # Multiple event IDs
-Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4624,4625,4634}
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4624,4625,4634} -MaxEvents 100
 
-# Keyword filtering
-Get-WinEvent -FilterHashtable @{LogName='System'} | Where-Object {$_.Message -like "*error*"}
+# Export event logs
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4625} -MaxEvents 1000 | Export-Csv "failed-logins_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv" -NoTypeInformation
 ```
 
----
+## User and Account Analysis
 
-## User & Account Analysis
-
-### User Account Information
 ```powershell
 # Local users
-Get-LocalUser
-Get-WmiObject -Class Win32_UserAccount
+Get-LocalUser -ErrorAction SilentlyContinue
+Get-CimInstance -ClassName Win32_UserAccount
 
 # Current user context
 whoami
 [System.Security.Principal.WindowsIdentity]::GetCurrent()
 
 # User sessions
-Get-WmiObject -Class Win32_LogonSession
+Get-CimInstance -ClassName Win32_LogonSession
 query user
-```
 
-### Group Membership
-```powershell
-# Local groups
-Get-LocalGroup
-Get-LocalGroupMember -Group "Administrators"
+# Group membership
+Get-LocalGroup -ErrorAction SilentlyContinue
+Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue
 
 # User group membership
-Get-LocalUser | ForEach-Object {Get-LocalGroupMember -Member $_.Name -ErrorAction SilentlyContinue}
-```
+Get-LocalUser -ErrorAction SilentlyContinue | ForEach-Object {Get-LocalGroupMember -Member $_.Name -ErrorAction SilentlyContinue}
 
-### Account Security
-```powershell
 # Password policy
 Get-LocalUser | Select-Object Name, PasswordRequired, PasswordExpires
 net accounts
 
 # Last logon times
-Get-WmiObject -Class Win32_NetworkLoginProfile
+Get-CimInstance -ClassName Win32_NetworkLoginProfile -ErrorAction SilentlyContinue
 ```
-
----
 
 ## Threat Hunting
 
-### Suspicious Process Hunting
 ```powershell
 # Processes with suspicious names
 Get-Process | Where-Object {$_.ProcessName -match "(mimikatz|psexec|meterpreter|cobalt)"}
 
 # Processes running from temp directories
-Get-WmiObject Win32_Process | Where-Object {$_.ExecutablePath -like "*\temp\*" -or $_.ExecutablePath -like "*\tmp\*"}
+Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -like "*\temp\*" -or $_.ExecutablePath -like "*\tmp\*"}
 
 # Unsigned processes
 Get-Process | Where-Object {$_.Path} | ForEach-Object {
-    $sig = Get-AuthenticodeSignature $_.Path
+    $sig = Get-AuthenticodeSignature $_.Path -ErrorAction SilentlyContinue
     if ($sig.Status -ne "Valid") { $_ }
 }
 
 # PowerShell with encoded commands
-Get-WmiObject Win32_Process | Where-Object {$_.CommandLine -like "*powershell*" -and $_.CommandLine -like "*-enc*"}
-```
+Get-CimInstance Win32_Process | Where-Object {$_.CommandLine -like "*powershell*" -and $_.CommandLine -like "*-enc*"}
 
-### Network Threat Hunting
-```powershell
 # Unusual network connections
 Get-NetTCPConnection | Where-Object {$_.RemotePort -in @(1337, 4444, 5555, 8080, 8888)}
 
-# Connections to suspicious IPs
-$SuspiciousIPs = @("192.168.1.100", "10.0.0.50")
-Get-NetTCPConnection | Where-Object {$_.RemoteAddress -in $SuspiciousIPs}
-
 # High number of connections from single process
 Get-NetTCPConnection | Group-Object OwningProcess | Where-Object {$_.Count -gt 10}
-```
 
-### File System Threat Hunting
-```powershell
 # Recently modified executables
-Get-ChildItem -Path C:\ -Include *.exe -Recurse | Where-Object {$_.LastWriteTime -gt (Get-Date).AddDays(-1)}
+Get-ChildItem -Path C:\ -Include *.exe -Recurse -ErrorAction SilentlyContinue | Where-Object {$_.LastWriteTime -gt (Get-Date).AddDays(-1)}
 
 # Files in suspicious locations
-Get-ChildItem -Path @("C:\Windows\Temp", "C:\Temp", "$env:APPDATA") -Include *.exe,*.bat,*.ps1 -Recurse
+Get-ChildItem -Path @("C:\Windows\Temp", "C:\Temp", "$env:APPDATA") -Include *.exe,*.bat,*.ps1 -Recurse -ErrorAction SilentlyContinue
 
 # Large files in temp directories
-Get-ChildItem -Path "$env:TEMP" -Recurse | Where-Object {$_.Length -gt 10MB}
+Get-ChildItem -Path "$env:TEMP" -Recurse -ErrorAction SilentlyContinue | Where-Object {$_.Length -gt 10MB}
 ```
 
----
+## Detection Recipes
 
-## Incident Response
-
-### Immediate Response
+### 1. Encoded PowerShell Commands
+**PowerShell Detection:**
 ```powershell
-# System isolation (disable network adapters)
-Get-NetAdapter | Disable-NetAdapter -Confirm:$false
-
-# Kill suspicious processes
-Stop-Process -Name "malicious_process" -Force
-Get-Process "suspicious*" | Stop-Process -Force
-
-# Disable services
-Stop-Service -Name "SuspiciousService" -Force
-Set-Service -Name "SuspiciousService" -StartupType Disabled
+Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PowerShell/Operational'; ID=4104} | 
+Where-Object {$_.Message -like "*-EncodedCommand*" -or $_.Message -like "*-enc*"}
+```
+**Splunk Query:**
+```
+index=windows source="WinEventLog:Microsoft-Windows-PowerShell/Operational" EventCode=4104 (Message="*-EncodedCommand*" OR Message="*-enc*")
 ```
 
-### Data Collection
+### 2. Invoke-Expression and IEX Usage
+**PowerShell Detection:**
 ```powershell
-# Create incident response directory
+Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PowerShell/Operational'; ID=4104} | 
+Where-Object {$_.Message -like "*Invoke-Expression*" -or $_.Message -like "*IEX*"}
+```
+**Elastic Query:**
+```json
+{
+  "query": {
+    "bool": {
+      "must": [
+        {"term": {"winlog.channel": "Microsoft-Windows-PowerShell/Operational"}},
+        {"term": {"winlog.event_id": 4104}},
+        {"bool": {"should": [
+          {"wildcard": {"message": "*Invoke-Expression*"}},
+          {"wildcard": {"message": "*IEX*"}}
+        ]}}
+      ]
+    }
+  }
+}
+```
+
+### 3. PowerShell from User Temp Folders
+**PowerShell Detection:**
+```powershell
+Get-CimInstance Win32_Process | Where-Object {
+    $_.Name -eq "powershell.exe" -and 
+    ($_.ExecutablePath -like "*\Users\*\AppData\Local\Temp\*" -or $_.ExecutablePath -like "*\Users\*\Temp\*")
+}
+```
+**Splunk Query:**
+```
+index=windows source="WinEventLog:Security" EventCode=4688 Process_Name=powershell.exe (Process_Command_Line="*\\Users\\*\\AppData\\Local\\Temp\\*" OR Process_Command_Line="*\\Users\\*\\Temp\\*")
+```
+
+### 4. Certutil Download Usage
+**PowerShell Detection:**
+```powershell
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4688} | 
+Where-Object {$_.Message -like "*certutil*" -and ($_.Message -like "*-urlcache*" -or $_.Message -like "*-split*")}
+```
+**Elastic Query:**
+```json
+{
+  "query": {
+    "bool": {
+      "must": [
+        {"term": {"winlog.event_id": 4688}},
+        {"wildcard": {"winlog.event_data.NewProcessName": "*certutil*"}},
+        {"bool": {"should": [
+          {"wildcard": {"winlog.event_data.CommandLine": "*-urlcache*"}},
+          {"wildcard": {"winlog.event_data.CommandLine": "*-split*"}}
+        ]}}
+      ]
+    }
+  }
+}
+```
+
+### 5. Unusual Parent-Child Relationships
+**PowerShell Detection:**
+```powershell
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4688} | 
+Where-Object {
+    ($_.Message -like "*winword.exe*" -or $_.Message -like "*excel.exe*" -or $_.Message -like "*outlook.exe*") -and
+    ($_.Message -like "*powershell.exe*" -or $_.Message -like "*cmd.exe*" -or $_.Message -like "*wscript.exe*")
+}
+```
+**Splunk Query:**
+```
+index=windows source="WinEventLog:Security" EventCode=4688 (Creator_Process_Name="*winword.exe" OR Creator_Process_Name="*excel.exe" OR Creator_Process_Name="*outlook.exe") (Process_Name="*powershell.exe" OR Process_Name="*cmd.exe" OR Process_Name="*wscript.exe")
+```
+
+### 6. Suspicious Rundll32 Usage
+**PowerShell Detection:**
+```powershell
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4688} | 
+Where-Object {$_.Message -like "*rundll32.exe*" -and $_.Message -notlike "*shell32.dll*" -and $_.Message -notlike "*user32.dll*"}
+```
+**Elastic Query:**
+```json
+{
+  "query": {
+    "bool": {
+      "must": [
+        {"term": {"winlog.event_id": 4688}},
+        {"wildcard": {"winlog.event_data.NewProcessName": "*rundll32.exe*"}}
+      ],
+      "must_not": [
+        {"wildcard": {"winlog.event_data.CommandLine": "*shell32.dll*"}},
+        {"wildcard": {"winlog.event_data.CommandLine": "*user32.dll*"}}
+      ]
+    }
+  }
+}
+```
+
+### 7. Regsvr32 Scriptlet Execution
+**PowerShell Detection:**
+```powershell
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4688} | 
+Where-Object {$_.Message -like "*regsvr32*" -and ($_.Message -like "*scrobj.dll*" -or $_.Message -like "*/u*" -or $_.Message -like "*/s*")}
+```
+**Splunk Query:**
+```
+index=windows source="WinEventLog:Security" EventCode=4688 Process_Name="*regsvr32*" (Process_Command_Line="*scrobj.dll*" OR Process_Command_Line="*/u*" OR Process_Command_Line="*/s*")
+```
+
+### 8. Living Off The Land Binaries (LOLBins)
+**PowerShell Detection:**
+```powershell
+$LOLBins = @("bitsadmin.exe", "regasm.exe", "regsvcs.exe", "installutil.exe", "msbuild.exe")
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4688} | 
+Where-Object {
+    $Message = $_.Message
+    $LOLBins | ForEach-Object { if ($Message -like "*$_*") { return $true } }
+}
+```
+**Elastic Query:**
+```json
+{
+  "query": {
+    "bool": {
+      "must": [
+        {"term": {"winlog.event_id": 4688}},
+        {"bool": {"should": [
+          {"wildcard": {"winlog.event_data.NewProcessName": "*bitsadmin.exe*"}},
+          {"wildcard": {"winlog.event_data.NewProcessName": "*regasm.exe*"}},
+          {"wildcard": {"winlog.event_data.NewProcessName": "*regsvcs.exe*"}},
+          {"wildcard": {"winlog.event_data.NewProcessName": "*installutil.exe*"}},
+          {"wildcard": {"winlog.event_data.NewProcessName": "*msbuild.exe*"}}
+        ]}}
+      ]
+    }
+  }
+}
+```
+
+## Incident Response Checklist
+
+### First Response Commands (Run in Order)
+```powershell
+# 1. Create IR directory with timestamp
 $IRDir = "C:\IR_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
 New-Item -ItemType Directory -Path $IRDir
 
-# Collect system information
-Get-ComputerInfo | Out-File "$IRDir\system_info.txt"
-Get-Process | Export-Csv "$IRDir\processes.csv" -NoTypeInformation
-Get-Service | Export-Csv "$IRDir\services.csv" -NoTypeInformation
-Get-NetTCPConnection | Export-Csv "$IRDir\network_connections.csv" -NoTypeInformation
+# 2. Start transcript logging
+Start-Transcript -Path "$IRDir\powershell-session_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+
+# 3. Collect volatile data immediately
+Get-Process | Export-Csv "$IRDir\processes_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv" -NoTypeInformation
+Get-NetTCPConnection | Export-Csv "$IRDir\network-connections_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv" -NoTypeInformation
+Get-Service | Export-Csv "$IRDir\services_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv" -NoTypeInformation
+
+# 4. Collect recent PowerShell activity
+Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PowerShell/Operational'; ID=4104} -MaxEvents 500 | 
+Export-Csv "$IRDir\powershell-scriptblocks_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv" -NoTypeInformation
+
+# 5. Collect system information
+Get-ComputerInfo | Out-File "$IRDir\system-info_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+Get-LocalUser | Export-Csv "$IRDir\local-users_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv" -NoTypeInformation
+Get-LocalGroupMember -Group "Administrators" | Export-Csv "$IRDir\local-admins_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv" -NoTypeInformation
+
+# 6. Collect security events
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4624,4625,4648,4720,4726} -MaxEvents 1000 | 
+Export-Csv "$IRDir\security-events_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv" -NoTypeInformation
+
+# 7. Stop transcript
+Stop-Transcript
 ```
 
-### Timeline Creation
+### IR Sequence (Recommended Order)
+1. **Isolate** - Document but do not disconnect network yet
+2. **Collect Volatile** - Run the commands above immediately
+3. **Capture Memory** - If authorized, use tools like DumpIt or WinPmem
+4. **Image Disk** - Create forensic image if authorized
+5. **Preserve Logs** - Export all relevant event logs
+6. **Contain** - Isolate system after data collection
+
+### Memory Capture (If Authorized)
+```powershell
+# Using DumpIt (download first)
+.\DumpIt.exe /OUTPUT C:\IR\memory-dump_$(Get-Date -Format 'yyyyMMdd_HHmmss').dmp /QUIET
+
+# Using WinPmem (download first)
+.\winpmem.exe C:\IR\memory-dump_$(Get-Date -Format 'yyyyMMdd_HHmmss').aff4
+```
+
+## Forensics and Evidence Collection
+
 ```powershell
 # File system timeline
-Get-ChildItem -Path C:\ -Recurse | Select-Object FullName, CreationTime, LastWriteTime, LastAccessTime | Export-Csv "$IRDir\file_timeline.csv"
+Get-ChildItem -Path C:\ -Recurse -Force -ErrorAction SilentlyContinue | 
+Select-Object FullName, CreationTime, LastWriteTime, LastAccessTime, Length | 
+Export-Csv "$IRDir\file-timeline_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv" -NoTypeInformation
 
-# Event log timeline
-Get-WinEvent -LogName Security | Select-Object TimeCreated, Id, LevelDisplayName, Message | Export-Csv "$IRDir\security_events.csv"
-```
-
----
-
-## Forensics & Evidence Collection
-
-### Memory Analysis
-```powershell
-# Running processes with memory usage
-Get-Process | Select-Object ProcessName, Id, CPU, WorkingSet, PagedMemorySize | Sort-Object WorkingSet -Descending
-
-# Process modules and DLLs
-Get-Process -Name "notepad" | Select-Object -ExpandProperty Modules
-```
-
-### Registry Forensics
-```powershell
+# Registry forensics
 # USB device history
-Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Enum\USBSTOR\*\*" | Select-Object PSChildName, FriendlyName
+Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Enum\USBSTOR\*\*" -ErrorAction SilentlyContinue | 
+Export-Csv "$IRDir\usb-history_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv" -NoTypeInformation
 
 # Recently accessed files
-Get-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs"
+Get-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs" -ErrorAction SilentlyContinue | 
+Out-File "$IRDir\recent-docs_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
 
 # Run key persistence
 $RunKeys = @(
     "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
-    "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+    "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+    "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"
 )
 foreach ($Key in $RunKeys) {
-    Get-ItemProperty -Path $Key
+    Get-ItemProperty -Path $Key -ErrorAction SilentlyContinue | 
+    Out-File "$IRDir\run-keys_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt" -Append
 }
-```
 
-### File Analysis
-```powershell
-# File metadata
-Get-ItemProperty -Path "C:\file.exe" | Select-Object FullName, CreationTime, LastWriteTime, LastAccessTime, Length
+# File metadata analysis
+Get-ItemProperty -Path "C:\suspicious_file.exe" -ErrorAction SilentlyContinue | 
+Select-Object FullName, CreationTime, LastWriteTime, LastAccessTime, Length
 
-# File signatures
-Get-Content -Path "C:\file.exe" -Encoding Byte -ReadCount 16 -TotalCount 16
+# File hashes for known files
+$SuspiciousFiles = @("C:\Windows\Temp\*.exe", "C:\Users\*\AppData\*.exe")
+foreach ($Pattern in $SuspiciousFiles) {
+    Get-ChildItem -Path $Pattern -Recurse -ErrorAction SilentlyContinue | 
+    Get-FileHash | Export-Csv "$IRDir\file-hashes_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv" -NoTypeInformation -Append
+}
 
 # Alternate data streams
-Get-Item -Path "C:\file.txt" -Stream *
-Get-Content -Path "C:\file.txt:stream_name"
+Get-ChildItem -Path C:\ -Recurse -ErrorAction SilentlyContinue | 
+ForEach-Object { Get-Item -Path $_.FullName -Stream * -ErrorAction SilentlyContinue } | 
+Where-Object { $_.Stream -ne ":$DATA" } | 
+Export-Csv "$IRDir\alternate-data-streams_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv" -NoTypeInformation
 ```
 
----
+## ANALYSIS ONLY Commands
 
-## Security Monitoring
+**⚠️ WARNING: Do not run these commands on production systems without proper approval. These commands can change system state, disable protections, or modify persistence mechanisms.**
 
-### Continuous Monitoring Scripts
+### System Isolation Commands
 ```powershell
-# Monitor new processes
-Register-WmiEvent -Query "SELECT * FROM Win32_ProcessStartTrace" -Action {
-    $Event = $Event.SourceEventArgs.NewEvent
-    Write-Host "New Process: $($Event.ProcessName) PID: $($Event.ProcessID)"
-}
+# Disable network adapters (RISK: System isolation, loss of remote access)
+Get-NetAdapter | Disable-NetAdapter -Confirm:$false
+# MITIGATION: Use only when authorized. Consider selective interface disabling.
 
-# Monitor file system changes
-$Watcher = New-Object System.IO.FileSystemWatcher
-$Watcher.Path = "C:\Windows\System32"
-$Watcher.Filter = "*.exe"
-$Watcher.EnableRaisingEvents = $true
+# Kill processes (RISK: System instability, data loss)
+Stop-Process -Name "suspicious_process" -Force
+Get-Process "malware*" | Stop-Process -Force
+# MITIGATION: Verify process before killing. Use Get-Process first to confirm target.
+
+# Disable services (RISK: System functionality loss)
+Stop-Service -Name "SuspiciousService" -Force
+Set-Service -Name "SuspiciousService" -StartupType Disabled
+# MITIGATION: Document original service state. Use Get-Service first to verify.
 ```
 
-### Log Monitoring
+### Security Control Modifications
 ```powershell
-# Real-time event log monitoring
-Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4625} -MaxEvents 1 | ForEach-Object {
-    Write-Host "Failed logon attempt detected: $($_.Message)"
-}
-```
-
----
-
-## Malware Analysis
-
-### Static Analysis
-```powershell
-# File information
-Get-ItemProperty -Path "C:\malware.exe" | Format-List
-Get-FileHash -Path "C:\malware.exe" -Algorithm MD5,SHA1,SHA256
-
-# PE header analysis (requires additional modules)
-# Import-Module PETools
-# Get-PEHeader -Path "C:\malware.exe"
-
-# Strings extraction (basic)
-Get-Content -Path "C:\malware.exe" -Encoding Byte | ForEach-Object {[char]$_} | Out-String
-```
-
-### Dynamic Analysis Setup
-```powershell
-# Create isolated environment
-# Disable Windows Defender (for analysis only)
+# Disable Windows Defender (RISK: Removes malware protection)
 Set-MpPreference -DisableRealtimeMonitoring $true
+# MITIGATION: Only for isolated analysis systems. Re-enable immediately after analysis.
 
-# Enable process monitoring
-$ProcessWatch = Register-WmiEvent -Query "SELECT * FROM Win32_ProcessStartTrace" -Action {
-    $Event = $Event.SourceEventArgs.NewEvent
-    Add-Content -Path "C:\analysis\process_log.txt" -Value "$(Get-Date): $($Event.ProcessName) started"
-}
+# Execution policy bypass (RISK: Allows unsigned script execution)
+Set-ExecutionPolicy Bypass -Scope Process
+powershell -ExecutionPolicy Bypass -File script.ps1
+# MITIGATION: Use minimal scope. Prefer -Scope Process over system-wide changes.
+
+# Registry modifications (RISK: System instability, security bypass)
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" -Name "EnableScriptBlockLogging" -Value 1
+# MITIGATION: Document original values. Test in isolated environment first.
 ```
 
----
-
-## Active Directory Security
-
-### AD Enumeration
+### PowerShell Remoting (Network Exposure Risk)
 ```powershell
-# Domain information
-Get-ADDomain
-Get-ADForest
+# Enable PowerShell remoting (RISK: Network attack surface increase)
+Enable-PSRemoting -Force
+# MITIGATION: Use only when necessary. Configure firewall rules appropriately.
 
-# Domain controllers
-Get-ADDomainController -Filter *
-
-# Users and groups
-Get-ADUser -Filter * -Properties LastLogonDate, PasswordLastSet
-Get-ADGroup -Filter * | Select-Object Name, GroupScope, GroupCategory
-
-# Computer accounts
-Get-ADComputer -Filter * -Properties LastLogonDate, OperatingSystem
+# Configure trusted hosts (RISK: Authentication bypass)
+Set-Item WSMan:\localhost\Client\TrustedHosts -Value "*"
+# MITIGATION: Use specific hostnames instead of wildcards.
 ```
 
-### AD Security Analysis
-```powershell
-# Privileged accounts
-Get-ADGroupMember -Identity "Domain Admins"
-Get-ADGroupMember -Identity "Enterprise Admins"
+## Sysmon and EDR Primer
 
-# Service accounts
-Get-ADUser -Filter {ServicePrincipalName -like "*"} -Properties ServicePrincipalName
+For comprehensive blue team operations, deploy Sysmon with these critical event types:
+- **Process Create (ID 1)** - Track all process executions with command lines
+- **Network Connect (ID 3)** - Monitor outbound network connections
+- **Image Load (ID 7)** - Detect DLL injection and suspicious library loads
+- **Driver Load (ID 6)** - Identify malicious driver installations
+- **File Create (ID 11)** - Monitor file system changes in critical directories
+- **Registry Events (ID 12-14)** - Track registry modifications for persistence
 
-# Stale accounts
-Get-ADUser -Filter * -Properties LastLogonDate | Where-Object {$_.LastLogonDate -lt (Get-Date).AddDays(-90)}
-Get-ADComputer -Filter * -Properties LastLogonDate | Where-Object {$_.LastLogonDate -lt (Get-Date).AddDays(-90)}
-```
-
----
+**Recommended Sysmon Config:** Use SwiftOnSecurity's sysmon-config or Olaf Hartong's sysmon-modular configurations available on GitHub for enterprise-ready detection rules.
 
 ## PowerShell Security Features
 
-### Constrained Language Mode
+### Execution Policy
 ```powershell
-# Check language mode
-$ExecutionContext.SessionState.LanguageMode
+# Check current execution policy
+Get-ExecutionPolicy
+Get-ExecutionPolicy -List
 
-# Set constrained language mode
-$ExecutionContext.SessionState.LanguageMode = "ConstrainedLanguage"
+# View PowerShell version (v5+ recommended for security features)
+$PSVersionTable.PSVersion
 ```
 
 ### Script Block Logging
 ```powershell
-# Enable script block logging via registry
-New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" -Force
-Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" -Name "EnableScriptBlockLogging" -Value 1
-
-# View PowerShell logs
+# View PowerShell script block logs
 Get-WinEvent -LogName "Microsoft-Windows-PowerShell/Operational" | Where-Object {$_.Id -eq 4104}
+
+# Check if script block logging is enabled
+Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" -ErrorAction SilentlyContinue
 ```
 
-### PowerShell Remoting Security
+### Constrained Language Mode
 ```powershell
-# Enable PowerShell remoting
-Enable-PSRemoting -Force
+# Check current language mode
+$ExecutionContext.SessionState.LanguageMode
 
-# Configure trusted hosts
-Set-Item WSMan:\localhost\Client\TrustedHosts -Value "server1,server2"
-
-# Use SSL for remoting
-New-PSSession -ComputerName "server" -UseSSL
-```
-
----
-
-## Advanced Techniques
-
-### WMI Queries for Security
-```powershell
-# Detect lateral movement
-Get-WmiObject -Class Win32_LogonSession | Where-Object {$_.LogonType -eq 3}
-
-# Network shares
-Get-WmiObject -Class Win32_Share
-
-# Scheduled tasks
-Get-WmiObject -Class Win32_ScheduledJob
-Get-ScheduledTask | Where-Object {$_.State -eq "Running"}
-```
-
-### PowerShell Empire Detection
-```powershell
-# Detect Empire agents
-Get-Process | Where-Object {$_.ProcessName -eq "powershell"} | ForEach-Object {
-    $proc = Get-WmiObject Win32_Process -Filter "ProcessId = $($_.Id)"
-    if ($proc.CommandLine -match "empire|invoke-|downloadstring") {
-        Write-Host "Suspicious PowerShell process detected: $($proc.CommandLine)"
-    }
+# Verify if constrained language mode is active (should show "ConstrainedLanguage" in secure environments)
+if ($ExecutionContext.SessionState.LanguageMode -eq "ConstrainedLanguage") {
+    Write-Host "Constrained Language Mode is active"
+} else {
+    Write-Host "Full Language Mode is active - review security configuration"
 }
 ```
 
-### Memory Forensics with PowerShell
+### PowerShell Transcript Logging
 ```powershell
-# Process memory dump (requires additional tools)
-# Get-Process -Name "suspicious_process" | Out-Minidump -DumpFilePath "C:\memory_dump.dmp"
+# Check if transcript logging is configured
+Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription" -ErrorAction SilentlyContinue
 
-# Analyze loaded modules
-Get-Process -Name "notepad" | Select-Object -ExpandProperty Modules | Select-Object ModuleName, FileName
+# Manual session transcript (always use during IR)
+Start-Transcript -Path "C:\IR\powershell-transcript_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+# Analysis commands here
+Stop-Transcript
+```
+
+### Module Logging
+```powershell
+# View module loading events
+Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PowerShell/Operational'; ID=4103}
+
+# Check module logging configuration
+Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging" -ErrorAction SilentlyContinue
+```
+
+## Quick Reference
+
+### Essential Exports for Documentation
+```powershell
+# Complete system snapshot
+$Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$IRDir = "C:\IR_$Timestamp"
+New-Item -ItemType Directory -Path $IRDir
+
+# Core system data
+Get-Process | Export-Csv "$IRDir\processes_$Timestamp.csv" -NoTypeInformation
+Get-Service | Export-Csv "$IRDir\services_$Timestamp.csv" -NoTypeInformation
+Get-NetTCPConnection | Export-Csv "$IRDir\connections_$Timestamp.csv" -NoTypeInformation
+Get-CimInstance Win32_StartupCommand | Export-Csv "$IRDir\startup_$Timestamp.csv" -NoTypeInformation
+Get-ScheduledTask | Export-Csv "$IRDir\scheduled-tasks_$Timestamp.csv" -NoTypeInformation
+
+# Security events
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4624,4625,4648} -MaxEvents 1000 | 
+Export-Csv "$IRDir\security-events_$Timestamp.csv" -NoTypeInformation
+
+# PowerShell activity
+Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PowerShell/Operational'; ID=4104} -MaxEvents 500 | 
+Export-Csv "$IRDir\powershell-activity_$Timestamp.csv" -NoTypeInformation
+```
+
+### One-Liner Threat Hunting
+```powershell
+# Quick suspicious process check
+Get-CimInstance Win32_Process | Where-Object {$_.CommandLine -like "*powershell*" -and ($_.CommandLine -like "*-enc*" -or $_.CommandLine -like "*invoke-expression*" -or $_.CommandLine -like "*downloadstring*")} | Select-Object Name, ProcessId, CommandLine
+
+# Quick network anomaly check
+Get-NetTCPConnection | Where-Object {$_.State -eq "Established" -and $_.RemotePort -in @(4444,5555,1337,8080,8888)} | Select-Object LocalPort, RemoteAddress, RemotePort, @{Name="Process";Expression={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName}}
+
+# Quick file system check
+Get-ChildItem -Path @("C:\Windows\Temp", "C:\Users\*\AppData\Local\Temp") -Include *.exe,*.ps1,*.bat -Recurse -ErrorAction SilentlyContinue | Where-Object {$_.CreationTime -gt (Get-Date).AddHours(-24)} | Select-Object FullName, CreationTime, Length
 ```
 
 ---
 
-## Quick Reference Commands
-
-### Essential One-Liners
-```powershell
-# Quick system triage
-Get-Process | Sort-Object CPU -Descending | Select-Object -First 10
-Get-NetTCPConnection -State Established | Select-Object LocalPort, RemoteAddress, RemotePort, @{Name="Process";Expression={(Get-Process -Id $_.OwningProcess).ProcessName}}
-Get-EventLog -LogName Security -InstanceId 4625 -Newest 10
-
-# Suspicious activity detection
-Get-WmiObject Win32_Process | Where-Object {$_.CommandLine -like "*invoke-expression*" -or $_.CommandLine -like "*iex*"}
-Get-ChildItem -Path C:\Users\*\AppData\Roaming -Include *.exe -Recurse | Where-Object {$_.CreationTime -gt (Get-Date).AddHours(-1)}
-
-# Network analysis
-Get-NetTCPConnection | Where-Object {$_.State -eq "Established"} | Group-Object RemoteAddress | Sort-Object Count -Descending
-```
-
-### PowerShell for Blue Team Automation
-```powershell
-# Automated threat hunting script template
-function Hunt-Threats {
-    $Results = @()
-    
-    # Check for suspicious processes
-    $SuspiciousProcs = Get-Process | Where-Object {$_.ProcessName -match "(mimikatz|psexec|procdump)"}
-    if ($SuspiciousProcs) {
-        $Results += "Suspicious processes detected: $($SuspiciousProcs.ProcessName -join ', ')"
-    }
-    
-    # Check for unusual network connections
-    $UnusualConns = Get-NetTCPConnection | Where-Object {$_.RemotePort -in @(4444, 5555, 1337)}
-    if ($UnusualConns) {
-        $Results += "Unusual network connections detected on ports: $($UnusualConns.RemotePort -join ', ')"
-    }
-    
-    return $Results
-}
-
-# Run threat hunt
-Hunt-Threats
-```
-
----
-
-## Best Practices for Blue Team
-
-1. **Always run PowerShell as Administrator** for full system access
-2. **Use -WhatIf parameter** when testing potentially destructive commands
-3. **Log all activities** during incident response
-4. **Create snapshots** before making system changes
-5. **Use transcript logging** to record PowerShell sessions:
-   ```powershell
-   Start-Transcript -Path "C:\IR\powershell_session.txt"
-   # Your commands here
-   Stop-Transcript
-   ```
-6. **Validate findings** with multiple data sources
-7. **Document everything** during investigations
-8. **Use signed scripts** in production environments
-9. **Implement least privilege** for PowerShell execution
-10. **Monitor PowerShell usage** with appropriate logging
-
----
-
-*This cheat sheet provides a comprehensive reference for PowerShell commands useful in blue team cybersecurity operations. Always ensure you have proper authorization before running these commands in any environment.*
+*This cheat sheet provides practical PowerShell commands for blue team operations. Always verify you have proper authorization before running any commands, especially those in the ANALYSIS ONLY section. Document all actions during incident response.*
